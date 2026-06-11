@@ -567,6 +567,124 @@ class PRSearchScanner:
         print(f"\n✅ 扫描完成，共找到 {len(self.scanned_prs)} 个符合条件的 PR")
         return self.scanned_prs
     
+    def scan_iter(
+        self,
+        languages: list[str] = None,
+        days: int = 365,
+        min_stars: int = 10,
+        max_results: int = 1000,
+        has_tests: bool = None,
+        min_files: int = 1,
+        max_files: int = 100,
+        only_merged: bool = True,
+        licenses: list[str] = None,
+        min_lines: int = 0,
+        balanced: bool = False,
+    ):
+        """扫描 GitHub PR 的迭代器版本 - 逐个返回 PR，支持流水线处理"""
+        since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        if languages:
+            scan_languages = [l for l in languages if l in LANGUAGE_EXTENSIONS]
+        else:
+            scan_languages = list(LANGUAGE_EXTENSIONS.keys())
+        
+        license_query = self._build_license_query(licenses)
+        
+        if balanced:
+            results_per_lang = max(1, max_results // len(scan_languages))
+        
+        lang_counts: Dict[str, int] = {lang: 0 for lang in scan_languages}
+        total_count = 0
+        
+        for lang in scan_languages:
+            keywords = LANGUAGE_EXTENSIONS[lang]["github_query_keywords"]
+            lang_query = " OR ".join(keywords)
+            
+            query_parts = [
+                f"({lang_query})",
+                "is:pr",
+                f"created:>={since_date}",
+                f"({license_query})",
+            ]
+            
+            if only_merged:
+                query_parts.append("is:merged")
+            
+            query = " ".join(query_parts)
+            
+            try:
+                search_results = self.client.search_issues(
+                    query=query,
+                    sort="updated",
+                    order="desc",
+                    per_page=100,
+                    pages=10
+                )
+                
+                max_per_lang = results_per_lang if balanced else max_results
+                
+                for item in search_results[:max_per_lang * 2]:
+                    if total_count >= max_results:
+                        return
+                    
+                    if balanced and lang_counts[lang] >= max_per_lang:
+                        break
+                    
+                    owner = item.get("repository_url", "").rstrip("/").split("/")[-2]
+                    repo = item.get("repository_url", "").rstrip("/").split("/")[-1]
+                    pr_number = item.get("number")
+                    
+                    try:
+                        pr_detail = self.client.get_pull_request(owner, repo, pr_number)
+                        pr_files = self.client.get_pull_request_files(owner, repo, pr_number)
+                        
+                        additions = pr_detail.get("additions", 0)
+                        deletions = pr_detail.get("deletions", 0)
+                        total_lines = additions + deletions
+                        
+                        if min_lines > 0 and total_lines < min_lines:
+                            continue
+                        
+                        try:
+                            repo_info = self.client.get_repo_info(owner, repo)
+                            stars = repo_info.get("stargazers_count", 0)
+                            if stars < min_stars:
+                                continue
+                        except Exception:
+                            pass
+                        
+                        detected_lang = self._detect_language(pr_files) or lang
+                        file_count = len(pr_files)
+                        
+                        if file_count < min_files or file_count > max_files:
+                            continue
+                        
+                        has_test_changes, test_files = self._check_has_tests(pr_files, detected_lang)
+                        if has_tests is not None and has_test_changes != has_tests:
+                            continue
+                        
+                        pr = self._create_pr_from_search_result(item)
+                        if pr:
+                            pr.detected_language = detected_lang
+                            pr.has_tests = has_test_changes
+                            pr.test_files = test_files
+                            pr.instance_id = f"instance_{owner}__{repo}__{pr_number}"
+                            pr.additions = additions
+                            pr.deletions = deletions
+                            pr.total_lines = total_lines
+                            
+                            lang_counts[lang] += 1
+                            total_count += 1
+                            
+                            yield asdict(pr)
+                            
+                    except Exception:
+                        continue
+                        
+            except Exception:
+                continue
+    
     def save_to_json(self, output_path: str):
         """保存结果到 JSON 文件"""
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
