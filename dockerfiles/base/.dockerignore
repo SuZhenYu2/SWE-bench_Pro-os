@@ -1,0 +1,26 @@
+# 忽略非必要文件以减小构建上下文
+# 语言相关依赖目录
+**/node_modules/
+**/target/
+**/.venv/
+**/__pycache__/
+**/venv/
+**/.gradle/
+**/build/
+**/dist/
+**/.tox/
+**/vendor/
+**/.m2/
+**/bundle/
+
+# Git/IDE
+**/.git/
+**/.gitignore
+**/.github/
+**/.vscode/
+**/.idea/
+
+# 日志和临时文件
+**/*.log
+**/tmp/
+**/temp/
