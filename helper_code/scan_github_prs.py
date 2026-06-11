@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """
-GitHub PR 扫描工具 - 爬取符合 SWE-Bench 风格的多语言 MIT 协议 PR
+GitHub PR 扫描工具 - 爬取符合 SWE-Bench 风格的多语言开源协议 PR
 
 功能：
-1. 搜索 GitHub 上 MIT 协议的 merged PR
-2. 按语言筛选和分类
+1. 搜索 GitHub 上宽泛协议（MIT、BSD、Apache 2.0、ISC等）的 merged PR
+2. 按语言筛选和分类，支持语言分布均匀采样
 3. 提取 PR 元数据（标题、描述、测试文件、issue 链接等）
 4. 生成符合 SWE-Bench 实例格式的数据
+5. 支持筛选修改行数 ≥ 110 的 PR
+
+项目要求：
+- 协议：MIT、BSD、Apache 2.0、ISC、BSD-3-Clause、BSD-2-Clause、Unlicense、CC0、MPL-2.0
+- 语言：Python, JavaScript, TypeScript, Java, Go, Rust, Ruby, PHP, .NET, C++, Elixir
+- 修改行数：≥ 110 行
+- 语言分布：尽量均匀
 
 用法：
-# 扫描所有语言的 MIT PR
-python scan_github_prs.py --output data/mit_prs.jsonl
+# 扫描所有语言的 PR（修改行数≥110，语言均匀分布）
+python scan_github_prs.py --output data/prs.jsonl --min-lines 110 --balanced
 
-# 仅扫描 JavaScript/TypeScript PR
-python scan_github_prs.py --languages javascript typescript --output data/js_prs.jsonl
+# 指定特定协议
+python scan_github_prs.py --output data/prs.jsonl --licenses mit bsd apache-2.0 --min-lines 110
 
-# 仅扫描最近 30 天更新的 PR
-python scan_github_prs.py --days 30 --output data/recent_prs.jsonl
+# 指定语言并生成 SWE-Bench 格式
+python scan_github_prs.py --languages python javascript go --output data/instances.jsonl --swebench-format
 
 # 设置 GitHub Token（建议使用，避免 API 限流）
 export GITHUB_TOKEN=ghp_xxxx
@@ -30,7 +37,7 @@ import sys
 import time
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, List
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -41,7 +48,20 @@ import urllib.error
 GITHUB_API_BASE = "https://api.github.com"
 DEFAULT_HEADERS = {
     "Accept": "application/vnd.github.v3+json",
-    "User-Agent": "SWE-Bench-PR-Scanner/1.0"
+    "User-Agent": "SWE-Bench-PR-Scanner/1.1"
+}
+
+# 支持的宽泛开源协议
+PERMISSIVE_LICENSES = {
+    "mit": "MIT",
+    "bsd": "BSD",
+    "bsd-3-clause": "BSD-3-Clause",
+    "bsd-2-clause": "BSD-2-Clause",
+    "apache-2.0": "Apache-2.0",
+    "isc": "ISC",
+    "unlicense": "Unlicense",
+    "cc0-1.0": "CC0-1.0",
+    "mpl-2.0": "MPL-2.0",
 }
 
 # 语言与文件扩展名/特征的映射
@@ -272,6 +292,17 @@ class PRSearchScanner:
     def __init__(self, github_token: Optional[str] = None):
         self.client = GitHubAPIClient(github_token)
         self.scanned_prs: list[PullRequest] = []
+    
+    def _build_license_query(self, licenses: List[str]) -> str:
+        """构建协议查询字符串"""
+        if not licenses:
+            licenses = list(PERMISSIVE_LICENSES.keys())
+        
+        valid_licenses = [l for l in licenses if l in PERMISSIVE_LICENSES]
+        if not valid_licenses:
+            valid_licenses = list(PERMISSIVE_LICENSES.keys())
+        
+        return " OR ".join([f"license:{l}" for l in valid_licenses])
         
     def _detect_language(self, pr_files: list) -> Optional[str]:
         """根据文件变更检测语言"""
@@ -392,8 +423,25 @@ class PRSearchScanner:
         min_files: int = 1,
         max_files: int = 100,
         only_merged: bool = True,
+        licenses: list[str] = None,
+        min_lines: int = 0,
+        balanced: bool = False,
     ) -> list[PullRequest]:
-        """扫描 GitHub PR"""
+        """扫描 GitHub PR
+        
+        参数:
+            languages: 要扫描的语言列表，None 表示所有支持的语言
+            days: 扫描最近多少天的 PR
+            min_stars: 仓库最少 star 数
+            max_results: 最大结果数
+            has_tests: 是否只保留包含测试的 PR (True/False/None)
+            min_files: 最少变更文件数
+            max_files: 最多变更文件数
+            only_merged: 是否只扫描已合并的 PR
+            licenses: 协议列表，None 表示所有支持的宽泛协议
+            min_lines: 最小修改行数 (additions + deletions)
+            balanced: 是否保持语言分布均匀
+        """
         self.scanned_prs = []
         
         since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -403,11 +451,24 @@ class PRSearchScanner:
         else:
             scan_languages = list(LANGUAGE_EXTENSIONS.keys())
         
+        license_query = self._build_license_query(licenses)
+        
         print(f"🔍 开始扫描 PR...")
         print(f"   语言: {scan_languages if languages else '所有'}")
+        print(f"   协议: {licenses if licenses else '所有支持的宽泛协议'}")
         print(f"   时间范围: 最近 {days} 天")
         print(f"   最少 star: {min_stars}")
+        print(f"   最少修改行数: {min_lines}")
         print(f"   最大结果: {max_results}")
+        print(f"   语言均匀分布: {'是' if balanced else '否'}")
+        
+        if balanced:
+            results_per_lang = max(1, max_results // len(scan_languages))
+            print(f"   每语言最多: {results_per_lang} 个 PR")
+        
+        lang_prs: Dict[str, List[PullRequest]] = {}
+        for lang in scan_languages:
+            lang_prs[lang] = []
         
         for lang in scan_languages:
             print(f"\n📂 扫描 {lang} 语言的 PR...")
@@ -419,11 +480,14 @@ class PRSearchScanner:
                 f"({lang_query})",
                 "is:pr",
                 f"created:>={since_date}",
-                "license:mit",
+                f"({license_query})",
             ]
             
             if only_merged:
                 query_parts.append("is:merged")
+            
+            if min_lines > 0:
+                query_parts.append(f"is:merged")
             
             query = " ".join(query_parts)
             
@@ -433,12 +497,14 @@ class PRSearchScanner:
                     sort="updated",
                     order="desc",
                     per_page=100,
-                    pages=max_results // 100 + 1
+                    pages=10
                 )
                 
                 print(f"   找到 {len(search_results)} 个候选 PR")
                 
-                for item in search_results[:max_results // len(scan_languages)]:
+                max_per_lang = results_per_lang if balanced else max_results
+                
+                for item in search_results[:max_per_lang * 2]:
                     owner = item.get("repository_url", "").rstrip("/").split("/")[-2]
                     repo = item.get("repository_url", "").rstrip("/").split("/")[-1]
                     pr_number = item.get("number")
@@ -447,7 +513,13 @@ class PRSearchScanner:
                         pr_detail = self.client.get_pull_request(owner, repo, pr_number)
                         pr_files = self.client.get_pull_request_files(owner, repo, pr_number)
                         
-                        # 获取 star 数
+                        additions = pr_detail.get("additions", 0)
+                        deletions = pr_detail.get("deletions", 0)
+                        total_lines = additions + deletions
+                        
+                        if min_lines > 0 and total_lines < min_lines:
+                            continue
+                        
                         try:
                             repo_info = self.client.get_repo_info(owner, repo)
                             stars = repo_info.get("stargazers_count", 0)
@@ -464,19 +536,22 @@ class PRSearchScanner:
                         if file_count < min_files or file_count > max_files:
                             continue
                         
-                        has_test变更, test_files = self._check_has_tests(pr_files, detected_lang)
-                        if has_tests is not None and has_test变更 != has_tests:
+                        has_test_changes, test_files = self._check_has_tests(pr_files, detected_lang)
+                        if has_tests is not None and has_test_changes != has_tests:
                             continue
                         
                         pr = self._create_pr_from_search_result(item)
                         if pr:
                             pr.detected_language = detected_lang
-                            pr.has_tests = has_test变更
+                            pr.has_tests = has_test_changes
                             pr.test_files = test_files
                             pr.instance_id = f"instance_{owner}__{repo}__{pr_number}"
                             
-                            self.scanned_prs.append(pr)
-                            print(f"   ✅ PR #{pr_number}: {pr.pr_title[:50]}...")
+                            lang_prs[detected_lang].append(pr)
+                            print(f"   ✅ PR #{pr_number}: {pr.pr_title[:50]}... (行: {total_lines})")
+                            
+                            if balanced and len(lang_prs[detected_lang]) >= max_per_lang:
+                                break
                             
                     except Exception as e:
                         print(f"   ⚠️ 处理 PR #{pr_number} 失败: {e}")
@@ -485,6 +560,9 @@ class PRSearchScanner:
             except Exception as e:
                 print(f"   ❌ 搜索 {lang} PR 失败: {e}")
                 continue
+        
+        for lang, prs in lang_prs.items():
+            self.scanned_prs.extend(prs)
         
         print(f"\n✅ 扫描完成，共找到 {len(self.scanned_prs)} 个符合条件的 PR")
         return self.scanned_prs
@@ -530,12 +608,15 @@ class PRSearchScanner:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="扫描 GitHub 上符合 SWE-Bench 风格的多语言 MIT 协议 PR",
+        description="扫描 GitHub 上符合 SWE-Bench 风格的多语言开源协议 PR",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 扫描所有语言的 MIT PR
-  python scan_github_prs.py --output data/mit_prs.jsonl
+  # 扫描所有语言的 PR（修改行数≥110，语言均匀分布）
+  python scan_github_prs.py --output data/prs.jsonl --min-lines 110 --balanced
+
+  # 指定特定协议（MIT、BSD、Apache 2.0）
+  python scan_github_prs.py --output data/prs.jsonl --licenses mit bsd apache-2.0 --min-lines 110
 
   # 仅扫描 JavaScript/TypeScript PR
   python scan_github_prs.py --languages javascript typescript --output data/js_prs.jsonl
@@ -557,10 +638,15 @@ def parse_args():
     parser.add_argument("--languages", "-l", nargs="+",
                         choices=list(LANGUAGE_EXTENSIONS.keys()),
                         help="要扫描的语言")
+    parser.add_argument("--licenses", nargs="+",
+                        choices=list(PERMISSIVE_LICENSES.keys()),
+                        help="要扫描的协议 (默认: 所有支持的宽泛协议)")
     parser.add_argument("--days", "-d", type=int, default=365,
                         help="扫描最近多少天的 PR (默认: 365)")
     parser.add_argument("--min-stars", type=int, default=10,
                         help="仓库最少 star 数 (默认: 10)")
+    parser.add_argument("--min-lines", type=int, default=0,
+                        help="最少修改行数 (additions + deletions, 默认: 0)")
     parser.add_argument("--max-results", type=int, default=1000,
                         help="最大结果数 (默认: 1000)")
     parser.add_argument("--has-tests", action="store_true",
@@ -571,6 +657,8 @@ def parse_args():
                         help="最少变更文件数 (默认: 1)")
     parser.add_argument("--max-files", type=int, default=100,
                         help="最多变更文件数 (默认: 100)")
+    parser.add_argument("--balanced", action="store_true",
+                        help="保持语言分布均匀")
     parser.add_argument("--swebench-format", action="store_true",
                         help="生成 SWE-Bench 实例格式")
     parser.add_argument("--format", choices=["json", "jsonl"], default="jsonl",
@@ -605,6 +693,9 @@ def main():
         has_tests=has_tests_filter,
         min_files=args.min_files,
         max_files=args.max_files,
+        licenses=args.licenses,
+        min_lines=args.min_lines,
+        balanced=args.balanced,
     )
     
     if args.swebench_format:
