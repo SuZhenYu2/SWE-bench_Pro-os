@@ -1,6 +1,19 @@
 #!/bin/bash
 # Fetch PR details from GitHub API
 
+# 黑名单文件路径
+BLACKLIST_FILE="/home/ubuntu/data/github/黑名单.text"
+
+# 检查仓库是否在黑名单中
+is_blacklisted() {
+  local repo=$1
+  if [ -f "$BLACKLIST_FILE" ]; then
+    grep -q "^${repo}$" "$BLACKLIST_FILE"
+    return $?
+  fi
+  return 1
+}
+
 prs=(
 "redis/redis 15322"
 "redis/redis 15321"
@@ -107,6 +120,13 @@ prs=(
 for entry in "${prs[@]}"; do
   repo=$(echo "$entry" | awk '{print $1}')
   pr=$(echo "$entry" | awk '{print $2}')
+
+  # 检查仓库是否在黑名单中
+  if is_blacklisted "$repo"; then
+    echo "# 跳过黑名单仓库: ${repo}" >&2
+    continue
+  fi
+
   # URL-encode the repo
   encoded_repo=$(echo "$repo" | sed 's/\//%2F/g')
   url="https://api.github.com/repos/${repo}/pulls/${pr}"
@@ -116,6 +136,11 @@ for entry in "${prs[@]}"; do
   changed_files=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('changed_files',0))" 2>/dev/null)
   title=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('title',''))" 2>/dev/null)
   total=$((additions + deletions))
-  echo "${repo},${pr},\"${title}\",${additions},${deletions},${total},${changed_files}"
+
+  # 过滤条件：代码变更行数 > 150 且 patch 文件数量 > 5
+  if [ "$total" -gt 150 ] && [ "$changed_files" -gt 5 ]; then
+    echo "${repo},${pr},\"${title}\",${additions},${deletions},${total},${changed_files}"
+  fi
+
   sleep 0.5
 done

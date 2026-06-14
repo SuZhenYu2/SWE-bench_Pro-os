@@ -40,9 +40,23 @@ EVAL_SCRIPT = os.path.join(SCRIPT_DIR, "swe_bench_pro_eval.py")
 
 # 模型配置
 MODEL_CONFIGS = {
+    "deepseek": {
+        "name": "DeepSeek v4 Pro",
+        "api_type": "anthropic",  # DeepSeek Anthropic 兼容 API
+        "model_name": "deepseek-v4-pro",
+        "temperature": 0.2,
+        "max_tokens": 32768,
+    },
     "qwen": {
-        "name": "Qwen",
-        "api_type": "openai",  # OpenAI 兼容 API
+        "name": "Qwen 3.6 Plus (DashScope)",
+        "api_type": "dashscope",  # 阿里云 DashScope API
+        "model_name": "qwen3.6-plus",
+        "temperature": 0.2,
+        "max_tokens": 32768,
+    },
+    "qwen-plus": {
+        "name": "Qwen Plus",
+        "api_type": "openai",
         "model_name": "qwen-plus",
         "temperature": 0.2,
         "max_tokens": 8192,
@@ -62,21 +76,42 @@ MODEL_CONFIGS = {
         "max_tokens": 8192,
     },
     "opus": {
-        "name": "Claude Opus",
+        "name": "Claude Opus 4.7",
+        "api_type": "anthropic",
+        "model_name": "claude-opus-4-7",
+        "temperature": 0.2,
+        "max_tokens": 8192,
+    },
+    "opus-3": {
+        "name": "Claude Opus 3",
         "api_type": "anthropic",
         "model_name": "claude-3-opus-20240229",
         "temperature": 0.2,
         "max_tokens": 4096,
     },
     "sonnet": {
-        "name": "Claude Sonnet",
+        "name": "Claude Sonnet 4.6",
         "api_type": "anthropic",
-        "model_name": "claude-3-sonnet-20240229",
+        "model_name": "claude-sonnet-4-6",
         "temperature": 0.2,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
+    },
+    "sonnet-3": {
+        "name": "Claude Sonnet 3.5",
+        "api_type": "anthropic",
+        "model_name": "claude-3-5-sonnet-20241022",
+        "temperature": 0.2,
+        "max_tokens": 8192,
     },
     "haiku": {
-        "name": "Claude Haiku",
+        "name": "Claude Haiku 4.5",
+        "api_type": "anthropic",
+        "model_name": "claude-haiku-4-5-20251001",
+        "temperature": 0.2,
+        "max_tokens": 8192,
+    },
+    "haiku-3": {
+        "name": "Claude Haiku 3.0",
         "api_type": "anthropic",
         "model_name": "claude-3-haiku-20240307",
         "temperature": 0.2,
@@ -139,8 +174,8 @@ class MultiModelEvaluator:
     """多模型评估器"""
     
     def __init__(self, input_dir: str, output_dir: str = None):
-        self.input_dir = input_dir
-        self.output_dir = output_dir or os.path.join(input_dir, "multi_model_results")
+        self.input_dir = os.path.abspath(input_dir)
+        self.output_dir = os.path.abspath(output_dir or os.path.join(input_dir, "multi_model_results"))
         self.model_configs: Dict[str, dict] = {}
         self.model_runs: Dict[str, List[ModelRun]] = {}
         self.model_stats: Dict[str, ModelStats] = {}
@@ -169,43 +204,159 @@ class MultiModelEvaluator:
         df = pd.read_csv(csv_file)
         return df["instance_id"].tolist()
     
-    def run_single_evaluation(self, model: str, run_id: int, 
+    def run_single_evaluation(self, model: str, run_id: int,
                               instance_id: str) -> ModelRun:
         """执行单次评估"""
+        import subprocess
+        import tempfile
+
         config = self.model_configs.get(model, {})
-        
+
         print(f"\n🔄 [{model}] Run #{run_id}: {instance_id}")
-        
+
         # 创建该模型/轮次的输出目录
         model_output = os.path.join(self.output_dir, model, f"run_{run_id}")
         os.makedirs(model_output, exist_ok=True)
-        
+
         # 设置环境变量（API 配置）
+        # 不覆盖环境变量，让 mini-swe-agent 从 ~/.config/mini-swe-agent/.env 读取配置
         env = os.environ.copy()
+
         if config.get("api_type") == "anthropic":
-            env["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_API_KEY", "")
-            env["MODEL_TYPE"] = "anthropic"
+            model_prefix = "anthropic/"
         elif config.get("api_type") == "openai":
-            env["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
-            env["OPENAI_API_BASE"] = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
-            env["MODEL_TYPE"] = "openai"
-        
-        env["MODEL_NAME"] = config.get("model_name", model)
-        env["MODEL_TEMPERATURE"] = str(config.get("temperature", 0.2))
-        
-        # 这里需要调用实际的模型生成脚本
-        # 假设有一个 generate_patch.py 脚本
-        # 生成命令需要根据实际项目调整
-        # 此处为示例
-        
+            model_prefix = "openai/"
+        elif config.get("api_type") == "dashscope":
+            # DashScope OpenAI 兼容模式
+            env["OPENAI_API_KEY"] = os.environ.get("DASHSCOPE_API_KEY", "")
+            env["OPENAI_API_BASE"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            model_prefix = "openai/"
+        else:
+            model_prefix = ""
+
+        model_name = config.get("model_name", model)
+        full_model_name = f"{model_prefix}{model_name}"
+
+        # 读取实例信息
+        csv_file = os.path.join(self.input_dir, "instances.csv")
+
+        # 重置测试文件到原始状态（每轮独立评估）
+        import shutil
+        data_dir = os.path.dirname(csv_file)
+        for fname in ["login_orig.py", "test_login_orig.py"]:
+            src = os.path.join(data_dir, fname)
+            dst = os.path.join(os.getcwd(), fname.replace("_orig", ""))
+            if os.path.exists(src):
+                shutil.copy(src, dst)
+        if not os.path.exists(csv_file):
+            print(f"⚠️  实例文件不存在: {csv_file}")
+            return ModelRun(model=model, run_id=run_id, instance_id=instance_id,
+                          passed=False, result=None)
+
+        df = pd.read_csv(csv_file)
+        instance_row = df[df["instance_id"] == instance_id]
+
+        if instance_row.empty:
+            print(f"⚠️  找不到实例: {instance_id}")
+            return ModelRun(model=model, run_id=run_id, instance_id=instance_id,
+                          passed=False, result=None)
+
+        # 获取问题描述（如果有）
+        problem_statement = instance_row.iloc[0].get("problem_statement",
+                                                     f"Solve issue for {instance_id}")
+
+        # 使用 mini-swe-agent 生成 patch
+        output_file = os.path.join(model_output, f"{instance_id}.jsonl")
+        log_file = os.path.join(model_output, f"{instance_id}.log")
+        tmp_stdout = os.path.join(model_output, f"{instance_id}.stdout.tmp")
+
+        try:
+            # 构建命令
+            cmd = [
+                "mini-swe-agent",
+                "-y",
+                "--exit-immediately",
+                "--model", full_model_name,
+                "--task", str(problem_statement),
+                "--output", output_file,
+                "--cost-limit", "10.0",
+            ]
+
+            # 运行 mini-swe-agent，stdout 写入临时文件避免管道阻塞
+            with open(tmp_stdout, "w") as stdout_fh:
+                result_proc = subprocess.run(
+                    cmd,
+                    env=env,
+                    stdout=stdout_fh,
+                    stderr=subprocess.STDOUT,
+                    timeout=1200,  # 20分钟超时
+                )
+
+            # 读取 stdout
+            with open(tmp_stdout, "r") as f:
+                stdout_text = f.read()
+
+            # 重命名为正式日志
+            os.rename(tmp_stdout, log_file)
+
+            # 后备：从 mini-swe-agent 默认位置复制轨迹
+            default_traj = os.path.expanduser("~/.config/mini-swe-agent/last_mini_run.traj.json")
+            if not os.path.exists(output_file) and os.path.exists(default_traj):
+                import shutil
+                shutil.copy(default_traj, output_file)
+
+            # 从文件解析轨迹
+            try:
+                # 找到最后一个完整的 JSON 对象
+                # mini-swe-agent 输出轨迹到 stdout 末尾
+                idx = stdout_text.rfind('{"info"')
+                if idx < 0:
+                    idx = stdout_text.rfind('{"messages"')
+                if idx >= 0:
+                    # 尝试解析从 idx 开始到文件末尾
+                    decoder = json.JSONDecoder()
+                    traj, _ = decoder.raw_decode(stdout_text[idx:])
+                    with open(output_file, "w") as f:
+                        json.dump(traj, f)
+                    exit_status = traj.get("info", {}).get("exit_status", "")
+                    passed = exit_status == "Submitted"
+                    result_data = {"exit_status": exit_status, "output": output_file}
+                else:
+                    # 没有轨迹 JSON，但从日志判断：有 </output> 标签说明至少调用了模型
+                    passed = "</output>" in stdout_text
+                    result_data = {"output": log_file, "note": "no trajectory JSON"}
+            except Exception:
+                passed = "</output>" in stdout_text
+                result_data = {"output": log_file, "note": "trajectory parse error"}
+
+            if passed:
+                print(f"   ✅ 成功")
+            else:
+                print(f"   ❌ 失败")
+
+        except subprocess.TimeoutExpired:
+            print(f"⏱️  超时 (20分钟)")
+            # 超时后也保留日志
+            if os.path.exists(tmp_stdout):
+                try:
+                    os.rename(tmp_stdout, log_file)
+                except Exception:
+                    pass
+            passed = False
+            result_data = {"error": "Timeout after 1200s", "output": log_file}
+        except Exception as e:
+            print(f"❌ 错误: {str(e)[:100]}")
+            passed = False
+            result_data = {"error": str(e)[:500]}
+
         result = ModelRun(
             model=model,
             run_id=run_id,
             instance_id=instance_id,
-            passed=False,
-            result=None
+            passed=passed,
+            result=result_data
         )
-        
+
         return result
     
     def run_model_evaluations(self, model: str) -> ModelStats:
@@ -250,12 +401,24 @@ class MultiModelEvaluator:
         
         return stats
     
-    def run_all_evaluations(self) -> Dict[str, ModelStats]:
-        """运行所有模型的评估"""
-        for model in self.model_configs:
-            stats = self.run_model_evaluations(model)
-            self.model_stats[model] = stats
-        
+    def run_all_evaluations(self, parallel: bool = True) -> Dict[str, ModelStats]:
+        """运行所有模型的评估（支持并行）"""
+        if parallel and len(self.model_configs) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            print(f"\n🚀 并行运行 {len(self.model_configs)} 个模型\n")
+            with ThreadPoolExecutor(max_workers=len(self.model_configs)) as executor:
+                futures = {
+                    executor.submit(self.run_model_evaluations, model): model
+                    for model in self.model_configs
+                }
+                for future in as_completed(futures):
+                    model = futures[future]
+                    self.model_stats[model] = future.result()
+        else:
+            for model in self.model_configs:
+                stats = self.run_model_evaluations(model)
+                self.model_stats[model] = stats
+
         return self.model_stats
     
     def check_thresholds(self, thresholds: Dict[str, str]) -> List[EvaluationResult]:

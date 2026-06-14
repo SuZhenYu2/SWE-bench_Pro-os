@@ -1,0 +1,2 @@
+instance_id,repo,base_commit,before_repo_set_cmd,selected_test_files_to_run,base_dockerfile,instance_dockerfile,FAIL_TO_PASS,PASS_TO_PASS,language,problem_statement
+instance_test_1,test/repo1,abc123,pip install -r requirements.txt,"['test_login.py']",,,python -m pytest test_login.py::test_login_success,python -m pytest test_login.py,python,"SECURITY FIX: login.py accepts username='admin' password='123456'. Add validation: reject empty username OR empty password with return False. Update test_login.py accordingly."
