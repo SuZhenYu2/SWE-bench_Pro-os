@@ -1,0 +1,103 @@
+# 分布式流水线配置
+# 每个阶段可独立配置 workers、超时、重试
+
+pipeline:
+  name: "SWE-Bench Pro Distributed Pipeline"
+  data_dir: "pipeline_data"
+
+  # 事件驱动: 阶段完成自动触发下一阶段
+  mode: "event-driven"
+
+  # Redis 配置 (事件总线)
+  redis:
+    host: "localhost"
+    port: 6379
+    password: "${REDIS_PASSWORD:-}"
+    stream: "swebench:pipeline:events"
+    consumer_group: "swebench-workers"
+
+stages:
+  discover:
+    description: "PR 发现 - 扫描 GitHub 获取开源 PR"
+    script: "helper_code/scan_github_prs.py"
+    input: null
+    output: "stage1_discover/prs.jsonl"
+    workers: 1
+    timeout: 3600
+    retry: 2
+
+  mine:
+    description: "PR 挖掘 - 克隆仓库，提取 git patch"
+    script: "helper_code/fetch_pr_patch.py"
+    input: "stage1_discover/prs.jsonl"
+    output: "stage2_mine/patches.json"
+    workers: 4
+    timeout: 7200
+    retry: 2
+
+  classify:
+    description: "PR 分类 - 按语言/难度分组，生成评估实例"
+    script: "helper_code/generate_instances.py"
+    input:
+      - "stage1_discover/prs.jsonl"
+      - "stage2_mine/patches.json"
+    output: "stage3_classify/instances.csv"
+    workers: 1
+    timeout: 600
+    retry: 1
+
+  fix:
+    description: "AI 修复 - 多模型并行生成补丁"
+    input: "stage3_classify/instances.csv"
+    output: "stage4_fix/"
+    workers: 4
+    timeout: 7200
+    retry: 3
+    config:
+      models:
+        deepseek: 8
+        qwen: 4
+      cost_limit: 10.0
+      per_instance_timeout: 1200
+
+  verify:
+    description: "Docker 验证 - 容器内运行测试确认补丁有效"
+    input:
+      - "stage3_classify/instances.csv"
+      - "stage4_fix/"
+    output: "stage5_verify/eval_results.json"
+    workers: 10
+    timeout: 14400
+    retry: 1
+    config:
+      use_local_docker: true
+      dockerhub_username: "jefzda"
+
+  gate:
+    description: "门禁检查 - 通过率阈值判断"
+    input: "stage5_verify/eval_results.json"
+    output: "stage6_gate/gate_report.md"
+    workers: 1
+    timeout: 60
+    config:
+      rules:
+        - metric: "overall_pass_rate"
+          condition: ">= 0.50"
+        - metric: "per_model_pass_rate"
+          condition: ">= 0.30"
+
+  package:
+    description: "打包 - 通过门禁的补丁打包发布"
+    input:
+      - "stage5_verify/eval_results.json"
+      - "stage6_gate/gate_report.md"
+    output: "stage7_package/"
+    workers: 1
+    timeout: 300
+
+  qa:
+    description: "质检 - 补丁完整性、安全性、合规检查"
+    input: "stage7_package/"
+    output: "stage8_qa/qa_report.md"
+    workers: 1
+    timeout: 600
