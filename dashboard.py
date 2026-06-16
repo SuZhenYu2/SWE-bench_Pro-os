@@ -129,7 +129,7 @@ th,td{padding:.5rem .75rem;text-align:left;border-bottom:1px solid #334155}th{co
 <h1>🚀 SWE-Bench Pro Pipeline <span id="clock"></span></h1>
 <div class="topbar">
 <input id="run-models" value="deepseek:2" placeholder="模型:轮次">
-<button class="btn btn-run" onclick="runPipeline()">▶ 运行流水线</button>
+<button class="btn btn-run" id="btn-run">▶ 运行流水线</button>
 <span id="run-msg"></span>
 <span id="status" class="disconnected">⏳ 连接中...</span>
 </div>
@@ -146,12 +146,17 @@ function $(id) { return document.getElementById(id); }
 // === 状态轮询 (每3秒) ===
 async function loadState() {
     try {
-        const projs = await (await fetch('/api/projects')).json();
+        const resp = await fetch('/api/projects');
+        if (!resp.ok) throw new Error('HTTP '+resp.status);
+        const projs = await resp.json();
         let tabs = '';
         projs.forEach((p,i) => {
-            tabs += `<button class="tab${i===0?' active':''}" onclick="switchProject('${p}')">${p}</button>`;
+            tabs += '<button class="tab' + (i===0?' active':'') + '" data-proj="' + p + '">' + p + '</button>';
         });
         $('tabs').innerHTML = tabs;
+        document.querySelectorAll('.tab').forEach(btn => {
+            btn.addEventListener('click', function() { switchProject(this.dataset.proj, this); });
+        });
         if (projs.length > 0 && (!currentProject || !projs.includes(currentProject))) currentProject = projs[0];
         if (currentProject) await loadProject(currentProject);
         await loadHistory();
@@ -159,12 +164,13 @@ async function loadState() {
         $('status').textContent = '🟢 在线';
         $('status').className = 'connected';
     } catch(e) {
-        $('status').textContent = '🔴 离线';
+        $('status').textContent = '🔴 离线 ('+e.message+')';
         $('status').className = 'disconnected';
     }
 }
 
 function startPolling() {
+    document.getElementById('btn-run').addEventListener('click', runPipeline);
     loadState();
     pollTimer = setInterval(loadState, 3000);
 }
@@ -179,10 +185,10 @@ async function loadHistory() {
     $('history').innerHTML = await r.text();
 }
 
-function switchProject(name) {
+function switchProject(name, btn) {
     currentProject = name;
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    event.target.classList.add('active');
+    if (btn) btn.classList.add('active');
     loadProject(name);
 }
 
@@ -220,7 +226,7 @@ async function viewLogs(proj, stage) {
 }
 function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-startPolling();
+try { startPolling(); } catch(e) { console.error(e); }
 </script></body></html>"""
 
 
@@ -232,7 +238,6 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/artifacts":
             self._json(self._all_artifacts())
         elif path.startswith("/api/logs/"):
-            # /api/logs/{project}/{stage}
             parts = path.split("/")
             self._json(self._get_logs(parts[3], parts[4] if len(parts)>4 else None))
         elif path.startswith("/api/artifacts/"):
@@ -247,6 +252,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.send_header("Content-Type","text/html; charset=utf-8")
+            self.send_header("Cache-Control","no-cache, no-store, must-revalidate")
             self.end_headers()
             self.wfile.write(PAGE.encode())
 
