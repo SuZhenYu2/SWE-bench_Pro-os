@@ -4,6 +4,8 @@
 pipeline:
   name: "SWE-Bench Pro Distributed Pipeline"
   data_dir: "pipeline_data"
+  # 项目名称 (产物落在 data_dir/{project}/ 下)
+  project: "${SWEBENCH_PROJECT:-default}"
 
   # 事件驱动: 阶段完成自动触发下一阶段
   mode: "event-driven"

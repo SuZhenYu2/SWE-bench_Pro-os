@@ -35,6 +35,13 @@ from prefect.task_runners import ConcurrentTaskRunner
 # ======================== 配置 ========================
 
 DATA_DIR = Path(os.environ.get("SWEBENCH_DATA_DIR", "pipeline_data"))
+PROJECT = os.environ.get("SWEBENCH_PROJECT", "default")
+
+def _path(stage_dir: str) -> Path:
+    """项目→阶段 路径: pipeline_data/{project}/stageN_name/"""
+    p = DATA_DIR / PROJECT / stage_dir
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 STAGE_ORDER = ["discover", "mine", "classify", "fix", "verify", "gate", "package", "qa"]
 
 MODEL_CONFIGS = {
